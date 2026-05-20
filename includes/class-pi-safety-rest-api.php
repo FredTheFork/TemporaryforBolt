@@ -1,9 +1,4 @@
 <?php
-/**
- * Planning Index Safety Module - REST API Endpoints
- * Comprehensive API for safety management features
- */
-
 if (!defined('ABSPATH')) exit;
 
 class PI_Safety_REST_API {
@@ -64,42 +59,26 @@ class PI_Safety_REST_API {
     
     public function check_job_permission($request) {
         $job_id = $request->get_param('job_id');
-        
-        // If job_id not in params, try to get it from URL path (id param)
-        if (!$job_id) {
-            $id = $request->get_param('id');
-            if ($id) {
-                // Try to fetch the record to get its job_id
-                $route = $request->get_route();
-                if (strpos($route, '/incidents/') !== false) {
-                    $incident = $this->wpdb->get_row($this->wpdb->prepare("SELECT job_id FROM {$this->tables['safety_incidents']} WHERE id = %d", $id));
-                    if ($incident) $job_id = $incident->job_id;
-                } elseif (strpos($route, '/observations/') !== false) {
-                    $observation = $this->wpdb->get_row($this->wpdb->prepare("SELECT job_id FROM {$this->tables['safety_observations']} WHERE id = %d", $id));
-                    if ($observation) $job_id = $observation->job_id;
-                } elseif (strpos($route, '/permits/') !== false) {
-                    $permit = $this->wpdb->get_row($this->wpdb->prepare("SELECT job_id FROM {$this->tables['permits_to_work']} WHERE id = %d", $id));
-                    if ($permit) $job_id = $permit->job_id;
-                } elseif (strpos($route, '/jha/') !== false) {
-                    $jha = $this->wpdb->get_row($this->wpdb->prepare("SELECT job_id FROM {$this->tables['job_hazard_analyses']} WHERE id = %d", $id));
-                    if ($jha) $job_id = $jha->job_id;
-                } elseif (strpos($route, '/toolbox-talks/') !== false) {
-                    $talk = $this->wpdb->get_row($this->wpdb->prepare("SELECT job_id FROM {$this->tables['toolbox_talks']} WHERE id = %d", $id));
-                    if ($talk) $job_id = $talk->job_id;
-                } elseif (strpos($route, '/inspections/') !== false) {
-                    $inspection = $this->wpdb->get_row($this->wpdb->prepare("SELECT job_id FROM {$this->tables['safety_inspections']} WHERE id = %d", $id));
-                    if ($inspection) $job_id = $inspection->job_id;
-                } elseif (strpos($route, '/meetings/') !== false) {
-                    $meeting = $this->wpdb->get_row($this->wpdb->prepare("SELECT job_id FROM {$this->tables['safety_meetings']} WHERE id = %d", $id));
-                    if ($meeting) $job_id = $meeting->job_id;
+        if (!$job_id && $request->get_param('id')) {
+            $route = $request->get_route();
+            $table_map = array(
+                '/incidents/' => 'safety_incidents',
+                '/observations/' => 'safety_observations',
+                '/permits/' => 'permits_to_work',
+                '/jha/' => 'job_hazard_analyses',
+                '/toolbox-talks/' => 'toolbox_talks',
+                '/inspections/' => 'safety_inspections',
+                '/meetings/' => 'safety_meetings'
+            );
+            foreach ($table_map as $path => $table) {
+                if (strpos($route, $path) !== false) {
+                    $record = $this->wpdb->get_row($this->wpdb->prepare("SELECT job_id FROM {$this->tables[$table]} WHERE id = %d", intval($request->get_param('id'))));
+                    if ($record) { $job_id = $record->job_id; break; }
                 }
             }
         }
-        
         if (current_user_can('manage_options')) return true;
-        if ($job_id && function_exists('pi_jobs_user_owns_job')) {
-            return pi_jobs_user_owns_job($job_id);
-        }
+        if ($job_id && function_exists('pi_jobs_user_owns_job')) return pi_jobs_user_owns_job($job_id);
         return current_user_can('edit_posts');
     }
     
@@ -125,28 +104,24 @@ class PI_Safety_REST_API {
         ));
     }
     
-    private function get_client_ip() {
-        return $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
-    }
     
     private function trigger_critical_alert($job_id, $incident_id, $severity) {
-        // Create notification entry
-        $notifications_table = $this->wpdb->prefix . 'pi_crm_notifications';
-        $this->wpdb->insert($notifications_table, array(
-            'job_id' => $job_id,
-            'item_type' => 'incident',
-            'item_id' => $incident_id,
-            'notification_type' => 'critical_alert',
-            'recipient_id' => 1, // Admin - should be configurable
+        $this->wpdb->insert($this->wpdb->prefix . 'pi_crm_notifications', array(
+            'job_id' => $job_id, 'item_type' => 'incident', 'item_id' => $incident_id,
+            'notification_type' => 'critical_alert', 'recipient_id' => 1,
             'recipient_email' => get_option('admin_email'),
             'subject' => "CRITICAL: {$severity} incident reported on Job #{$job_id}",
-            'message' => "A critical safety incident has been reported. Immediate attention required.",
-            'status' => 'pending',
-            'scheduled_at' => current_time('mysql')
+            'message' => 'A critical safety incident has been reported. Immediate attention required.',
+            'status' => 'pending', 'scheduled_at' => current_time('mysql')
         ));
     }
-    
-    // INCIDENT ROUTES - Core CRUD + special actions
+
+    private function decode_json_fields($record, $fields) {
+        foreach ($fields as $field) {
+            if (isset($record->$field) && $record->$field) $record->$field = json_decode($record->$field, true);
+        }
+        return $record;
+    }
     private function register_incident_routes() {
         register_rest_route($this->namespace, '/safety/incidents', array(
             array('methods' => WP_REST_Server::READABLE, 'callback' => array($this, 'get_incidents'), 'permission_callback' => array($this, 'check_job_permission')),
@@ -190,11 +165,7 @@ class PI_Safety_REST_API {
         $sql = $this->wpdb->prepare("SELECT * FROM {$table} WHERE {$where_clause} ORDER BY incident_date DESC LIMIT %d OFFSET %d", array_merge($params, array($limit, $offset)));
         $results = $this->wpdb->get_results($sql);
         
-        foreach ($results as &$inc) {
-            if ($inc->persons_involved) $inc->persons_involved = json_decode($inc->persons_involved, true);
-            if ($inc->injuries) $inc->injuries = json_decode($inc->injuries, true);
-            if ($inc->equipment_involved) $inc->equipment_involved = json_decode($inc->equipment_involved, true);
-        }
+        foreach ($results as &$inc) $this->decode_json_fields($inc, array('persons_involved', 'injuries', 'equipment_involved'));
         
         return new WP_REST_Response(array('success' => true, 'data' => $results), 200);
     }
@@ -330,17 +301,10 @@ class PI_Safety_REST_API {
     }
     
     private function get_incident_by_id($id) {
-        $table = $this->tables['safety_incidents'];
-        $incident = $this->wpdb->get_row($this->wpdb->prepare("SELECT * FROM {$table} WHERE id = %d", $id));
-        if ($incident) {
-            if ($incident->persons_involved) $incident->persons_involved = json_decode($incident->persons_involved, true);
-            if ($incident->injuries) $incident->injuries = json_decode($incident->injuries, true);
-            if ($incident->equipment_involved) $incident->equipment_involved = json_decode($incident->equipment_involved, true);
-        }
-        return $incident;
+        $incident = $this->wpdb->get_row($this->wpdb->prepare("SELECT * FROM {$this->tables['safety_incidents']} WHERE id = %d", $id));
+        return $incident ? $this->decode_json_fields($incident, array('persons_involved', 'injuries', 'equipment_involved')) : null;
     }
     
-    // INSPECTION ROUTES - Completely missing, add all CRUD + special actions
     private function register_inspection_routes() {
         register_rest_route($this->namespace, '/safety/inspections', array(
             array('methods' => WP_REST_Server::READABLE, 'callback' => array($this, 'get_inspections'), 'permission_callback' => array($this, 'check_job_permission')),
@@ -379,10 +343,7 @@ class PI_Safety_REST_API {
         $sql = $this->wpdb->prepare("SELECT * FROM {$table} WHERE {$where_clause} ORDER BY inspection_date DESC LIMIT %d OFFSET %d", array_merge($params, array($limit, $offset)));
         $results = $this->wpdb->get_results($sql);
         
-        foreach ($results as &$insp) {
-            if ($insp->checklist_items) $insp->checklist_items = json_decode($insp->checklist_items, true);
-            if ($insp->findings) $insp->findings = json_decode($insp->findings, true);
-        }
+        foreach ($results as &$insp) $this->decode_json_fields($insp, array('checklist_items', 'findings'));
         
         return new WP_REST_Response(array('success' => true, 'data' => $results), 200);
     }
@@ -543,16 +504,10 @@ class PI_Safety_REST_API {
     }
     
     private function get_inspection_by_id($id) {
-        $table = $this->tables['safety_inspections'];
-        $inspection = $this->wpdb->get_row($this->wpdb->prepare("SELECT * FROM {$table} WHERE id = %d", $id));
-        if ($inspection) {
-            if ($inspection->checklist_items) $inspection->checklist_items = json_decode($inspection->checklist_items, true);
-            if ($inspection->findings) $inspection->findings = json_decode($inspection->findings, true);
-        }
-        return $inspection;
+        $inspection = $this->wpdb->get_row($this->wpdb->prepare("SELECT * FROM {$this->tables['safety_inspections']} WHERE id = %d", $id));
+        return $inspection ? $this->decode_json_fields($inspection, array('checklist_items', 'findings')) : null;
     }
     
-    // OBSERVATION ROUTES
     private function register_observation_routes() {
         register_rest_route($this->namespace, '/safety/observations', array(
             array('methods' => WP_REST_Server::READABLE, 'callback' => array($this, 'get_observations'), 'permission_callback' => array($this, 'check_job_permission')),
@@ -583,9 +538,7 @@ class PI_Safety_REST_API {
         $sql = $this->wpdb->prepare("SELECT * FROM {$table} WHERE {$where_clause} ORDER BY observation_date DESC LIMIT %d", array_merge($params, array($limit)));
         $results = $this->wpdb->get_results($sql);
         
-        foreach ($results as &$obs) {
-            if ($obs->photo_urls) $obs->photo_urls = json_decode($obs->photo_urls, true);
-        }
+        foreach ($results as &$obs) $this->decode_json_fields($obs, array('photo_urls'));
         
         return new WP_REST_Response(array('success' => true, 'data' => $results), 200);
     }
@@ -673,13 +626,10 @@ class PI_Safety_REST_API {
     }
     
     private function get_observation_by_id($id) {
-        $table = $this->tables['safety_observations'];
-        $observation = $this->wpdb->get_row($this->wpdb->prepare("SELECT * FROM {$table} WHERE id = %d", $id));
-        if ($observation && $observation->photo_urls) $observation->photo_urls = json_decode($observation->photo_urls, true);
-        return $observation;
+        $observation = $this->wpdb->get_row($this->wpdb->prepare("SELECT * FROM {$this->tables['safety_observations']} WHERE id = %d", $id));
+        return $observation ? $this->decode_json_fields($observation, array('photo_urls')) : null;
     }
     
-    // PERMIT ROUTES - Basic CRUD + approve/extend/close + conflicts + suspend
     private function register_permit_routes() {
         register_rest_route($this->namespace, '/safety/permits', array(
             array('methods' => WP_REST_Server::READABLE, 'callback' => array($this, 'get_permits'), 'permission_callback' => array($this, 'check_job_permission')),
@@ -744,9 +694,7 @@ class PI_Safety_REST_API {
         
         $conflicts = $this->wpdb->get_results($sql);
         
-        foreach ($conflicts as &$permit) {
-            if ($permit->hazards_identified) $permit->hazards_identified = json_decode($permit->hazards_identified, true);
-        }
+        foreach ($conflicts as &$permit) $this->decode_json_fields($permit, array('hazards_identified'));
         
         return new WP_REST_Response(array('success' => true, 'data' => $conflicts), 200);
     }
@@ -766,10 +714,7 @@ class PI_Safety_REST_API {
         $sql = $this->wpdb->prepare("SELECT * FROM {$table} WHERE {$where_clause} ORDER BY start_datetime DESC LIMIT %d", array_merge($params, array($limit)));
         $results = $this->wpdb->get_results($sql);
         
-        foreach ($results as &$permit) {
-            if ($permit->hazards_identified) $permit->hazards_identified = json_decode($permit->hazards_identified, true);
-            if ($permit->approval_chain) $permit->approval_chain = json_decode($permit->approval_chain, true);
-        }
+        foreach ($results as &$permit) $this->decode_json_fields($permit, array('hazards_identified', 'approval_chain'));
         
         return new WP_REST_Response(array('success' => true, 'data' => $results), 200);
     }
@@ -901,16 +846,10 @@ class PI_Safety_REST_API {
     }
     
     private function get_permit_by_id($id) {
-        $table = $this->tables['permits_to_work'];
-        $permit = $this->wpdb->get_row($this->wpdb->prepare("SELECT * FROM {$table} WHERE id = %d", $id));
-        if ($permit) {
-            if ($permit->hazards_identified) $permit->hazards_identified = json_decode($permit->hazards_identified, true);
-            if ($permit->approval_chain) $permit->approval_chain = json_decode($permit->approval_chain, true);
-        }
-        return $permit;
+        $permit = $this->wpdb->get_row($this->wpdb->prepare("SELECT * FROM {$this->tables['permits_to_work']} WHERE id = %d", $id));
+        return $permit ? $this->decode_json_fields($permit, array('hazards_identified', 'approval_chain')) : null;
     }
     
-    // JHA ROUTES
     private function register_jha_routes() {
         register_rest_route($this->namespace, '/safety/jha', array(
             array('methods' => WP_REST_Server::READABLE, 'callback' => array($this, 'get_jhas'), 'permission_callback' => array($this, 'check_job_permission')),
@@ -966,10 +905,7 @@ class PI_Safety_REST_API {
         $where = $job_id ? 'job_id = ' . intval($job_id) : '1=1';
         $results = $this->wpdb->get_results("SELECT * FROM {$table} WHERE {$where} ORDER BY preparation_date DESC LIMIT {$limit}");
         
-        foreach ($results as &$jha) {
-            if ($jha->steps) $jha->steps = json_decode($jha->steps, true);
-            if ($jha->digital_acknowledgments) $jha->digital_acknowledgments = json_decode($jha->digital_acknowledgments, true);
-        }
+        foreach ($results as &$jha) $this->decode_json_fields($jha, array('steps', 'digital_acknowledgments'));
         
         return new WP_REST_Response(array('success' => true, 'data' => $results), 200);
     }
@@ -1060,17 +996,10 @@ class PI_Safety_REST_API {
     }
     
     private function get_jha_by_id($id) {
-        $table = $this->tables['job_hazard_analyses'];
-        $jha = $this->wpdb->get_row($this->wpdb->prepare("SELECT * FROM {$table} WHERE id = %d", $id));
-        if ($jha) {
-            if ($jha->steps) $jha->steps = json_decode($jha->steps, true);
-            if ($jha->digital_acknowledgments) $jha->digital_acknowledgments = json_decode($jha->digital_acknowledgments, true);
-            if ($jha->required_training_ids) $jha->required_training_ids = json_decode($jha->required_training_ids, true);
-        }
-        return $jha;
+        $jha = $this->wpdb->get_row($this->wpdb->prepare("SELECT * FROM {$this->tables['job_hazard_analyses']} WHERE id = %d", $id));
+        return $jha ? $this->decode_json_fields($jha, array('steps', 'digital_acknowledgments', 'required_training_ids')) : null;
     }
     
-    // TOOLBOX TALK ROUTES
     private function register_toolbox_talk_routes() {
         register_rest_route($this->namespace, '/safety/toolbox-talks', array(
             array('methods' => WP_REST_Server::READABLE, 'callback' => array($this, 'get_toolbox_talks'), 'permission_callback' => array($this, 'check_job_permission')),
@@ -1120,9 +1049,7 @@ class PI_Safety_REST_API {
         $where = $job_id ? 'job_id = ' . intval($job_id) : '1=1';
         $results = $this->wpdb->get_results("SELECT * FROM {$table} WHERE {$where} ORDER BY scheduled_date DESC LIMIT {$limit}");
         
-        foreach ($results as &$talk) {
-            if ($talk->attendance) $talk->attendance = json_decode($talk->attendance, true);
-        }
+        foreach ($results as &$talk) $this->decode_json_fields($talk, array('attendance'));
         
         return new WP_REST_Response(array('success' => true, 'data' => $results), 200);
     }
@@ -1201,18 +1128,10 @@ class PI_Safety_REST_API {
     }
     
     private function get_toolbox_talk_by_id($id) {
-        $table = $this->tables['toolbox_talks'];
-        $talk = $this->wpdb->get_row($this->wpdb->prepare("SELECT * FROM {$table} WHERE id = %d", $id));
-        if ($talk) {
-            if ($talk->attendance) $talk->attendance = json_decode($talk->attendance, true);
-            if ($talk->questions_asked) $talk->questions_asked = json_decode($talk->questions_asked, true);
-            if ($talk->photos) $talk->photos = json_decode($talk->photos, true);
-            if ($talk->required_for_trade) $talk->required_for_trade = json_decode($talk->required_for_trade, true);
-        }
-        return $talk;
+        $talk = $this->wpdb->get_row($this->wpdb->prepare("SELECT * FROM {$this->tables['toolbox_talks']} WHERE id = %d", $id));
+        return $talk ? $this->decode_json_fields($talk, array('attendance', 'questions_asked', 'photos', 'required_for_trade')) : null;
     }
     
-    // CERTIFICATION ROUTES (Enhanced existing)
     private function register_certification_routes() {
         register_rest_route($this->namespace, '/safety/certifications', array(
             array('methods' => WP_REST_Server::READABLE, 'callback' => array($this, 'get_certifications'), 'permission_callback' => array($this, 'check_general_permission')),
@@ -1439,7 +1358,6 @@ class PI_Safety_REST_API {
         return new WP_REST_Response(array('success' => true, 'message' => 'PPE record deleted'), 200);
     }
     
-    // MEETING ROUTES
     private function register_meeting_routes() {
         register_rest_route($this->namespace, '/safety/meetings', array(
             array('methods' => WP_REST_Server::READABLE, 'callback' => array($this, 'get_meetings'), 'permission_callback' => array($this, 'check_job_permission')),
@@ -1458,10 +1376,7 @@ class PI_Safety_REST_API {
         $where = $job_id ? 'job_id = ' . intval($job_id) : '1=1';
         $results = $this->wpdb->get_results("SELECT * FROM {$table} WHERE {$where} ORDER BY scheduled_date DESC LIMIT {$limit}");
         
-        foreach ($results as &$meeting) {
-            if ($meeting->attendees) $meeting->attendees = json_decode($meeting->attendees, true);
-            if ($meeting->action_items) $meeting->action_items = json_decode($meeting->action_items, true);
-        }
+        foreach ($results as &$meeting) $this->decode_json_fields($meeting, array('attendees', 'action_items'));
         
         return new WP_REST_Response(array('success' => true, 'data' => $results), 200);
     }
@@ -1524,7 +1439,6 @@ class PI_Safety_REST_API {
         return new WP_REST_Response(array('success' => true, 'message' => 'Meeting deleted'), 200);
     }
     
-    // DASHBOARD ROUTES
     private function register_dashboard_routes() {
         register_rest_route($this->namespace, '/safety/dashboard', array(
             'methods' => WP_REST_Server::READABLE,
@@ -1548,61 +1462,23 @@ class PI_Safety_REST_API {
     
     public function get_safety_dashboard($request) {
         $job_id = intval($request->get_param('job_id'));
-        
-        // Calculate safety score
-        $incidents_table = $this->tables['safety_incidents'];
-        $inspections_table = $this->tables['safety_inspections'];
-        $observations_table = $this->tables['safety_observations'];
-        $permits_table = $this->tables['permits_to_work'];
-        
-        $open_incidents = $this->wpdb->get_var($this->wpdb->prepare("SELECT COUNT(*) FROM {$incidents_table} WHERE job_id = %d AND status = 'open'", $job_id));
-        $avg_inspection_score = $this->wpdb->get_var($this->wpdb->prepare("SELECT AVG(score) FROM {$inspections_table} WHERE job_id = %d AND score IS NOT NULL", $job_id));
-        $active_permits = $this->wpdb->get_var($this->wpdb->prepare("SELECT COUNT(*) FROM {$permits_table} WHERE job_id = %d AND status IN ('approved', 'active')", $job_id));
-        $open_observations = $this->wpdb->get_var($this->wpdb->prepare("SELECT COUNT(*) FROM {$observations_table} WHERE job_id = %d AND status = 'open'", $job_id));
-        
-        // Simple safety score calculation (0-100)
-        $score = 100;
-        $score -= min($open_incidents * 5, 30); // Up to 30 points deducted for open incidents
-        $score -= min($open_observations * 2, 20); // Up to 20 points deducted for open observations
+        $open_incidents = $this->wpdb->get_var($this->wpdb->prepare("SELECT COUNT(*) FROM {$this->tables['safety_incidents']} WHERE job_id = %d AND status = 'open'", $job_id));
+        $avg_inspection_score = $this->wpdb->get_var($this->wpdb->prepare("SELECT AVG(score) FROM {$this->tables['safety_inspections']} WHERE job_id = %d AND score IS NOT NULL", $job_id));
+        $active_permits = $this->wpdb->get_var($this->wpdb->prepare("SELECT COUNT(*) FROM {$this->tables['permits_to_work']} WHERE job_id = %d AND status IN ('approved', 'active')", $job_id));
+        $open_observations = $this->wpdb->get_var($this->wpdb->prepare("SELECT COUNT(*) FROM {$this->tables['safety_observations']} WHERE job_id = %d AND status = 'open'", $job_id));
+        $score = 100 - min($open_incidents * 5, 30) - min($open_observations * 2, 20);
         if ($avg_inspection_score) $score = ($score + $avg_inspection_score) / 2;
         $score = max(0, min(100, $score));
-        
-        return new WP_REST_Response(array(
-            'success' => true,
-            'data' => array(
-                'safety_score' => round($score),
-                'open_incidents' => intval($open_incidents),
-                'active_permits' => intval($active_permits),
-                'open_observations' => intval($open_observations),
-                'avg_inspection_score' => $avg_inspection_score ? round($avg_inspection_score) : null
-            )
-        ), 200);
+        return new WP_REST_Response(array('success' => true, 'data' => array('safety_score' => round($score), 'open_incidents' => intval($open_incidents), 'active_permits' => intval($active_permits), 'open_observations' => intval($open_observations), 'avg_inspection_score' => $avg_inspection_score ? round($avg_inspection_score) : null)), 200);
     }
     
     public function get_safety_alerts($request) {
         $job_id = intval($request->get_param('job_id'));
         $alerts = array();
-        
-        // Check for critical incidents
-        $incidents_table = $this->tables['safety_incidents'];
-        $critical_incidents = $this->wpdb->get_results($this->wpdb->prepare(
-            "SELECT * FROM {$incidents_table} WHERE job_id = %d AND severity IN ('fatal', 'critical') AND status = 'open'",
-            $job_id
-        ));
-        foreach ($critical_incidents as $inc) {
-            $alerts[] = array('type' => 'critical', 'message' => 'Critical incident requires attention', 'entity_type' => 'incident', 'entity_id' => $inc->id);
-        }
-        
-        // Check for expiring permits
-        $permits_table = $this->tables['permits_to_work'];
-        $expiring_permits = $this->wpdb->get_results($this->wpdb->prepare(
-            "SELECT * FROM {$permits_table} WHERE job_id = %d AND status = 'approved' AND end_datetime BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 24 HOUR)",
-            $job_id
-        ));
-        foreach ($expiring_permits as $permit) {
-            $alerts[] = array('type' => 'warning', 'message' => 'Permit expiring soon', 'entity_type' => 'permit', 'entity_id' => $permit->id);
-        }
-        
+        $critical_incidents = $this->wpdb->get_results($this->wpdb->prepare("SELECT * FROM {$this->tables['safety_incidents']} WHERE job_id = %d AND severity IN ('fatal', 'critical') AND status = 'open'", $job_id));
+        foreach ($critical_incidents as $inc) $alerts[] = array('type' => 'critical', 'message' => 'Critical incident requires attention', 'entity_type' => 'incident', 'entity_id' => $inc->id);
+        $expiring_permits = $this->wpdb->get_results($this->wpdb->prepare("SELECT * FROM {$this->tables['permits_to_work']} WHERE job_id = %d AND status = 'approved' AND end_datetime BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 24 HOUR)", $job_id));
+        foreach ($expiring_permits as $permit) $alerts[] = array('type' => 'warning', 'message' => 'Permit expiring soon', 'entity_type' => 'permit', 'entity_id' => $permit->id);
         return new WP_REST_Response(array('success' => true, 'data' => $alerts), 200);
     }
     
@@ -1619,7 +1495,6 @@ class PI_Safety_REST_API {
         return new WP_REST_Response(array('success' => true, 'data' => $results), 200);
     }
     
-    // REPORT ROUTES
     private function register_report_routes() {
         register_rest_route($this->namespace, '/safety/reports/incidents', array(
             'methods' => WP_REST_Server::READABLE,
@@ -1637,47 +1512,25 @@ class PI_Safety_REST_API {
         $job_id = intval($request->get_param('job_id'));
         $start_date = $request->get_param('start_date');
         $end_date = $request->get_param('end_date');
-        
-        $table = $this->tables['safety_incidents'];
-        $where = array('job_id = ' . intval($job_id));
+        $where = array('job_id = ' . $job_id);
         $params = array();
-        
         if ($start_date) { $where[] = 'incident_date >= %s'; $params[] = sanitize_text_field($start_date); }
         if ($end_date) { $where[] = 'incident_date <= %s'; $params[] = sanitize_text_field($end_date); }
-        
         $where_clause = implode(' AND ', $where);
-        if (!empty($params)) {
-            $sql = $this->wpdb->prepare("SELECT * FROM {$table} WHERE {$where_clause} ORDER BY incident_date DESC", $params);
-        } else {
-            $sql = "SELECT * FROM {$table} WHERE {$where_clause} ORDER BY incident_date DESC";
-        }
-        
-        $results = $this->wpdb->get_results($sql);
-        
-        return new WP_REST_Response(array('success' => true, 'data' => $results), 200);
+        $sql = !empty($params) ? $this->wpdb->prepare("SELECT * FROM {$this->tables['safety_incidents']} WHERE {$where_clause} ORDER BY incident_date DESC", $params) : "SELECT * FROM {$this->tables['safety_incidents']} WHERE {$where_clause} ORDER BY incident_date DESC";
+        return new WP_REST_Response(array('success' => true, 'data' => $this->wpdb->get_results($sql)), 200);
     }
     
     public function get_inspection_report($request) {
         $job_id = intval($request->get_param('job_id'));
         $start_date = $request->get_param('start_date');
         $end_date = $request->get_param('end_date');
-        
-        $table = $this->tables['safety_inspections'];
-        $where = array('job_id = ' . intval($job_id));
+        $where = array('job_id = ' . $job_id);
         $params = array();
-        
         if ($start_date) { $where[] = 'inspection_date >= %s'; $params[] = sanitize_text_field($start_date); }
         if ($end_date) { $where[] = 'inspection_date <= %s'; $params[] = sanitize_text_field($end_date); }
-        
         $where_clause = implode(' AND ', $where);
-        if (!empty($params)) {
-            $sql = $this->wpdb->prepare("SELECT * FROM {$table} WHERE {$where_clause} ORDER BY inspection_date DESC", $params);
-        } else {
-            $sql = "SELECT * FROM {$table} WHERE {$where_clause} ORDER BY inspection_date DESC";
-        }
-        
-        $results = $this->wpdb->get_results($sql);
-        
-        return new WP_REST_Response(array('success' => true, 'data' => $results), 200);
+        $sql = !empty($params) ? $this->wpdb->prepare("SELECT * FROM {$this->tables['safety_inspections']} WHERE {$where_clause} ORDER BY inspection_date DESC", $params) : "SELECT * FROM {$this->tables['safety_inspections']} WHERE {$where_clause} ORDER BY inspection_date DESC";
+        return new WP_REST_Response(array('success' => true, 'data' => $this->wpdb->get_results($sql)), 200);
     }
 }
